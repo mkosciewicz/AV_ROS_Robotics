@@ -1,0 +1,144 @@
+#!/usr/bin/env python
+
+import time
+import rospy
+import math
+from std_msgs.msg import String, Float32
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
+
+# Parameters
+th = 0.005482709692924
+czas_probkowania = 0.000001
+od_zad = 0.4
+kp = 4.5
+ki = 0.01
+kd = 0.8
+
+# Initialize state variables
+calka_prawo = 0.0
+calka_lewo = 0.0
+uchyb_prawo_pop = 0.0
+pochodna = 0.0
+sciana_prawo = 0.0
+sciana_lewo = 0.0
+sciana_prawo_temp = 0.0
+sciana_lewo_temp = 0.0
+calka_prawo_pop = 0.0
+calka_lewo_pop = 0.0
+uchyb_prawo = 0.0
+uchyb_lewo = 0.0
+calka_prawo_prawdziwa_pop = 0
+calka_lewo_prawdziwa_pop = 0
+
+def callback(msg):
+    global calka_prawo_pop, calka_lewo_pop, sciana_prawo_temp, sciana_lewo_temp, sciana_prawo
+    global sciana_lewo, calka_prawo_prawdziwa, calka_prawo_prawdziwa_pop, calka_lewo_prawdziwa
+    global calka_lewo_prawdziwa_pop, czas_probkowania, pochodna, uchyb_prawo_pop
+
+    czas_start = time.time()
+    prawo_o, lewo_o, przod_o = [], [], []  # Distances from right, left, and front
+
+    for i in range(900, 1000):  # 726, 976
+        if msg.ranges[i] < 100 and msg.ranges[i + 1] < 100:
+            prawo_o.append(calculate_c(msg.ranges[i], msg.ranges[i + 1]))
+
+    for i in range(243, 286):  # 170,420
+        if msg.ranges[i] < 100 and msg.ranges[i + 1] < 100:
+            lewo_o.append(calculate_c(msg.ranges[i], msg.ranges[i + 1]))
+
+    for i in range(1071, 1146):  # 1071,1146
+        if msg.ranges[i] < 100 and msg.ranges[i + 1] < 100:
+            przod_o.append(calculate_c(msg.ranges[i], msg.ranges[i + 1]))
+
+    for i in range(0, 75):  # 0,75
+        if msg.ranges[i] < 100 and msg.ranges[i + 1] < 100:
+            przod_o.append(calculate_c(msg.ranges[i], msg.ranges[i + 1]))
+
+    sr_prawo = calculate_sr(prawo_o)
+    sr_lewo = calculate_sr(lewo_o)
+    sr_przod = calculate_sr(przod_o)
+
+    #sr_lewo = 100
+
+    control_angular_velocity(sr_prawo, sr_lewo, sr_przod)
+
+    czas_koniec = time.time()
+    czas_probkowania = czas_koniec - czas_start
+
+def calculate_c(a, b):
+    return (a * b * math.sin(th)) / math.sqrt(a ** 2 + b ** 2 - 2 * a * b * math.cos(th))
+
+
+def calculate_sr(list):
+    if list:
+        sorted_list = sorted(list)
+        length = len(sorted_list)
+        if length % 2 == 0:
+            return round((sorted_list[length // 2 - 1] + sorted_list[length // 2]) / 2, 3)
+        else:
+            return round(sorted_list[length // 2], 3)
+    else:
+        return 0
+
+
+def control_angular_velocity(sr_prawo, sr_lewo, sr_przod):
+    global calka_prawo_prawdziwa_pop, calka_prawo_prawdziwa, calka_lewo_prawdziwa, calka_lewo_prawdziwa_pop
+    global uchyb_prawo_pop, uchyb_prawo, calka_prawo, calka_lewo, sciana_prawo, sciana_lewo
+    global sciana_prawo_temp, sciana_lewo_temp
+
+    pub = rospy.Publisher('cmd_vel', Twist, queue_size=1)
+    twist = Twist()
+    twist.linear.x = 1
+
+    uchyb_prawo = od_zad - sr_prawo
+    uchyb_lewo = od_zad - sr_lewo
+
+    calka_prawo_prawdziwa = (uchyb_prawo) * czas_probkowania + calka_prawo_prawdziwa_pop
+    calka_prawo_prawdziwa_pop = calka_prawo_prawdziwa
+
+    calka_lewo_prawdziwa = (uchyb_lewo) * czas_probkowania + calka_lewo_prawdziwa_pop
+    calka_lewo_prawdziwa_pop = calka_lewo_prawdziwa
+
+    pochodna = (uchyb_prawo - uchyb_prawo_pop) / czas_probkowania
+    uchyb_prawo_pop = uchyb_prawo
+
+    calka_prawo = ((calka_prawo_prawdziwa)) * ki
+    calka_lewo = ((calka_lewo_prawdziwa)) * ki
+
+    sciana_prawo = uchyb_prawo * kp + calka_prawo + pochodna * kd
+    sciana_lewo = uchyb_lewo * kp + calka_lewo
+
+    sciana_prawo_temp = sciana_prawo
+    sciana_lewo_temp = sciana_lewo
+
+    if sr_prawo < sr_lewo:
+        twist.angular.z = limit_turn(sciana_prawo)
+    elif sr_lewo < sr_prawo:
+        twist.angular.z = -limit_turn(sciana_lewo)
+
+    if sr_przod < 0.7:
+        twist.linear.x = 0.9  # org: 0.25
+
+    if sr_przod < 0.6:
+        if sr_prawo < sr_lewo:
+            twist.angular.z = 1
+        if sr_lewo < sr_prawo:
+            twist.angular.z = -1
+
+    print '\n'
+    print 'time', time.time()
+    print 'calka prawdziwa', calka_prawo_prawdziwa
+    print 'calka od prawej', calka_prawo
+    print 'uchyb od prawej', uchyb_prawo
+
+    pub.publish(twist)
+
+
+def limit_turn(turn):
+    max_turn = 0.25
+    return max_turn if turn > max_turn else -max_turn if turn < -max_turn else turn
+
+rospy.init_node('scan_values')
+sub = rospy.Subscriber('/scan', LaserScan, callback)
+rospy.spin()
